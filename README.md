@@ -1,40 +1,125 @@
 # Library Management System
 
-The data layer for a library's book catalog, built with NestJS, Prisma and PostgreSQL (hosted on Neon).
+The data layer for a library's book catalog, built with NestJS, Prisma and PostgreSQL (hosted on Neon). The required files and their code are shown below, and each one is also in the repository at the path given.
 
-## Where the required files are
+## api/prisma/schema.prisma
 
-- [Prisma schema](api/prisma/schema.prisma): the `Role` enum (PATRON, LIBRARIAN), and the `User`, `Genre`, `Book` and `Review` models. `Book` has a `genreId` foreign key with `@relation`.
-- [Seed script](api/prisma/seed.ts): inserts 4 genres and 16 books spread across them.
-- [Migrations](api/prisma/migrations): the SQL that created the tables in the hosted database.
-- [Prisma service](api/src/prisma/prisma.service.ts): extends `PrismaClient`, implements `OnModuleInit` and calls `this.$connect()` in `onModuleInit()`.
-- [Environment example](api/.env.example): a `DATABASE_URL` placeholder with no real credentials.
+Defines the `Role` enum, `User`, `Genre`, `Book` (with a `genreId` foreign key and `@relation`) and `Review`.
 
-## Setup
+    generator client {
+      provider = "prisma-client-js"
+    }
 
-1. Go into the API folder: `cd api`
-2. Install the dependencies: `npm install`
-3. Copy `.env.example` to `.env` and put your PostgreSQL connection string in `DATABASE_URL`.
-4. Create the tables: `npx prisma migrate dev`
-5. Insert the sample data: `npx prisma db seed`
-6. Optional: look at the data with `npx prisma studio`
+    datasource db {
+      provider = "postgresql"
+      url      = env("DATABASE_URL")
+    }
+
+    enum Role {
+      PATRON
+      LIBRARIAN
+    }
+
+    model User {
+      id        Int      @id @default(autoincrement())
+      email     String   @unique
+      name      String
+      role      Role     @default(PATRON)
+      createdAt DateTime @default(now())
+      reviews   Review[]
+    }
+
+    model Genre {
+      id    Int    @id @default(autoincrement())
+      name  String @unique
+      books Book[]
+    }
+
+    model Book {
+      id              Int      @id @default(autoincrement())
+      title           String
+      author          String
+      isbn            String   @unique
+      publishedYear   Int
+      copiesAvailable Int      @default(1)
+      genreId         Int
+      genre           Genre    @relation(fields: [genreId], references: [id])
+      reviews         Review[]
+      createdAt       DateTime @default(now())
+
+      @@index([genreId])
+    }
+
+    model Review {
+      id        Int      @id @default(autoincrement())
+      bookId    Int
+      userId    Int
+      rating    Int
+      comment   String?
+      createdAt DateTime @default(now())
+      book      Book     @relation(fields: [bookId], references: [id])
+      user      User     @relation(fields: [userId], references: [id])
+
+      @@unique([bookId, userId])
+    }
+
+## api/src/prisma/prisma.service.ts
+
+Extends `PrismaClient`, implements `OnModuleInit` and calls `this.$connect()` inside `onModuleInit()`.
+
+    import { Injectable, OnModuleInit } from '@nestjs/common';
+    import { PrismaClient } from '@prisma/client';
+
+    @Injectable()
+    export class PrismaService extends PrismaClient implements OnModuleInit {
+      async onModuleInit() {
+        await this.$connect();
+      }
+    }
+
+## api/.env.example
+
+A placeholder only. The real `.env` is never committed.
+
+    DATABASE_URL="postgresql://USER:PASSWORD@HOST:5432/DATABASE?sslmode=require"
 
 ## Schema Decisions
 
 **Book references Genre instead of embedding it.** Each `Book` stores a `genreId` foreign key that points to one row in the `Genre` table, instead of carrying a copy of the genre inside the book.
 
-- **One source of truth.** A genre's name lives in exactly one row. If "Technology" is renamed, one update fixes every book. If the genre were embedded, the same text would be repeated on every book, and a missed copy would leave inconsistent data.
-- **Genres exist on their own.** A genre can be created, listed and kept even when it has no books yet. An embedded value cannot exist without a book.
-- **Integrity comes from the database.** The foreign key means a book cannot point to a genre that does not exist, and a genre that still has books cannot be deleted by accident.
-- **Simple, fast queries.** "All books in a genre" is a filter on `genreId`, and the `@@index([genreId])` keeps it fast as the catalog grows.
-- **It matches the real shape of the data.** One genre has many books and each book has one genre, which is a one-to-many relationship.
+- **One source of truth.** A genre's name lives in one row, so renaming "Technology" is one update. Embedded copies could drift apart.
+- **Genres exist on their own.** A genre can be created and kept even when it has no books.
+- **Integrity from the database.** The foreign key stops a book pointing to a genre that does not exist.
+- **Fast queries.** "All books in a genre" filters on `genreId`, and `@@index([genreId])` keeps it fast.
 
-Other decisions:
+Other decisions: `Role` is an enum so only `PATRON` or `LIBRARIAN` is allowed; `User.email` and `Book.isbn` are `@unique`; `@@unique([bookId, userId])` allows one review per user per book.
 
-- `Role` is an enum, so the database rejects any role other than `PATRON` or `LIBRARIAN`.
-- `User.email` and `Book.isbn` are `@unique`, so duplicates are impossible.
-- `Review` links a book and a user, and `@@unique([bookId, userId])` allows one review per user per book.
+## api/prisma/seed.ts
+
+Inserts 4 genres (Fiction, Science, History, Technology), 16 books spread across them (4 per genre), and 2 users. The core of the script:
+
+    await prisma.genre.createMany({
+      data: genreNames.map((name) => ({ name })),
+    });
+
+    await prisma.book.createMany({
+      data: books.map(([title, author, publishedYear, genre], index) => ({
+        title,
+        author,
+        publishedYear,
+        isbn: `978-0-000-${String(index + 1).padStart(4, '0')}-0`,
+        copiesAvailable: 3,
+        genreId: genreIdByName[genre],
+      })),
+    });
+
+## Setup
+
+1. `cd api` then `npm install`
+2. Copy `.env.example` to `.env` and put your PostgreSQL connection string in `DATABASE_URL`.
+3. `npx prisma migrate dev` creates the tables (the SQL is in `api/prisma/migrations`).
+4. `npx prisma db seed` inserts the sample data.
 
 ## Prisma vs a document database
 
-In a document database such as MongoDB, my first instinct would be to put the genre inside each book document, because it reads well in one query. In Prisma I had to define the relationship first, and the schema, the foreign key and the migration made me think about how the data connects before I wrote any of it. Seeding also felt different: I had to create the genres first so each book had a real `genreId` to point to.
+In a document database such as MongoDB, my first instinct would be to put the genre inside each book document. In Prisma I had to define the relationship first, and the schema, foreign key and migration made me think about how the data connects before I wrote any of it. Seeding also felt different, because I had to create the genres first so each book had a real `genreId`.
